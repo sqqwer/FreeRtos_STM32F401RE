@@ -18,20 +18,45 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
+#include "queue.h"
+#include "semphr.h"
+#include "event_groups.h"
+
+#include "string.h"
+#include "stdlib.h"
+#include "stdio.h"
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef uint8_t		bool;
+typedef uint32_t	blinkInterval;
+
+typedef struct {
+	uint8_t		str[25];
+	uint8_t 	size;
+}	queueItem_t;
+
+typedef struct {
+	bool			isOn;
+	blinkInterval	blinkInt;
+
+} ledStatus_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define QUEUE_SIZE 3
 
 /* USER CODE END PD */
 
@@ -43,8 +68,6 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart2;
 
-osThreadId defaultTaskHandle;
-osThreadId parserTaskHandle;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -53,8 +76,6 @@ osThreadId parserTaskHandle;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
-void StartDefaultTask(void const * argument);
-void parseTaskStart(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -62,6 +83,25 @@ void parseTaskStart(void const * argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+
+/**************** QUEUE HANDLER *****************/
+xQueueHandle	rxQueueHandler;
+
+/**************** QUEUE HANDLER *****************/
+SemaphoreHandle_t	xMutex;
+
+/**************** TASK HANDLER *****************/
+xTaskHandle	 	rxUartData;
+xTaskHandle		ledControl;
+xTaskHandle		parseData;
+
+/*************** TASK FUNCTIONS ****************/
+void			rxUartDataTask(void* argument);
+void			ledControlTask(void* argument);
+void			parseDataTask(void* argument);
+
+ledStatus_t	ledStatus;
 
 /* USER CODE END 0 */
 
@@ -72,7 +112,8 @@ void parseTaskStart(void const * argument);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  ledStatus.isOn		= 0;
+  ledStatus.blinkInt	= 250;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -95,47 +136,28 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /*		Queue create 		*/
+  rxQueueHandler = xQueueCreate(QUEUE_SIZE, sizeof(queueItem_t));
 
+  /*		Task create 		*/
+  xTaskCreate(rxUartDataTask, "rxUart", 128, NULL, 2, &rxUartData);
+  xTaskCreate(ledControlTask, "ledCtr", 128, NULL, 1, &ledControl);
+  xTaskCreate(parseDataTask, "parseData", 128, NULL, 1, &parseData);
+
+  /*		Mutex create		*/
+  xMutex = xSemaphoreCreateMutex();
+
+//  HAL_UART_Receive_IT(&huart2, &rxData, 1);
+  /*		Task scheduler start 		*/
+  vTaskStartScheduler();
   /* USER CODE END 2 */
 
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
-
-  /* definition and creation of parserTask */
-  osThreadDef(parserTask, parseTaskStart, osPriorityNormal, 0, 128);
-  parserTaskHandle = osThreadCreate(osThread(parserTask), NULL);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
-
-  /* Start scheduler */
-  osKernelStart();
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
-
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -227,10 +249,17 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA5 */
   GPIO_InitStruct.Pin = GPIO_PIN_5;
@@ -245,43 +274,128 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void			ledControlTask(void* argument)
+{
+	TickType_t tick;
+
+	tick = 1000;
+	for (;;)
+	{
+		if (ledStatus.blinkInt > 15 && ledStatus.isOn)
+		{
+			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+			tick = ledStatus.blinkInt;
+		}
+		else
+		{
+			if (ledStatus.isOn)
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 1);
+			else
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 0);
+		}
+		vTaskDelay(tick);
+	}
+}
+
+void			parseDataTask(void* argument)
+{
+	queueItem_t qElem;
+
+	qElem.size = 0;
+	memset(qElem.str, '\0', 25);
+
+	for (;;)
+	{
+		if (xSemaphoreTake(xMutex, (TickType_t)0xFFFFFFF) == 1 )
+		{
+			xQueueReceive(rxQueueHandler, &qElem, 20);
+			xSemaphoreGive(xMutex);
+		}
+		if (qElem.size)
+		{
+			char*	pBuff;
+
+			pBuff = (char*) qElem.str;
+			if (!strcmp(pBuff, "LED ON"))
+			{
+				ledStatus.isOn = 1;
+			}
+			else if (!strcmp(pBuff, "LED OFF"))
+			{
+				ledStatus.isOn = 0;
+			}
+			else if (!strncmp(pBuff, "LED BLINK ", 10))
+			{
+				ledStatus.blinkInt = atoi(pBuff + 10);
+			}
+			else if (!strcmp(pBuff, "STATUS"))
+			{
+				uint8_t numb[10];
+				char*	ledIs;
+				char* 	str0 = "\n\r";
+				char* 	str1 = "Status :\n\r";
+				char* 	str2 = "led is : on\n\r";
+				char* 	str3 = "led is : off\n\r";
+				char* 	str4 = "blink interval : ";
+
+				memset(numb, '\0', 10);
+				ledIs = (ledStatus.isOn) ? str2 : str3;
+				itoa((int)ledStatus.blinkInt, (char*)numb, 10);
+
+				HAL_UART_Transmit(&huart2, (uint8_t *)str1, strlen (str1), 20);
+				HAL_UART_Transmit(&huart2, (uint8_t *)ledIs, strlen (ledIs), 20);
+				HAL_UART_Transmit(&huart2, (uint8_t *)str4, strlen (str4), 20);
+				HAL_UART_Transmit(&huart2, (uint8_t *)numb, strlen ((const char*)numb), 20);
+				HAL_UART_Transmit(&huart2, (uint8_t *)str0, strlen (str0), 20);
+			}
+			qElem.size = 0;
+			memset(qElem.str, '\0', 25);
+		}
+		vTaskDelay(3000);
+	}
+}
+
+void	rxUartDataTask(void* argument)
+{
+	uint8_t sym;
+	uint8_t itter;
+	uint8_t buff[20];
+
+	itter	= 0;
+	sym 	= '\0';
+	memset(buff, '\0', 20);
+
+	for (;;)
+	{
+		if (xSemaphoreTake(xMutex, (TickType_t)0xFFFFFFF) == 1 )
+		{
+			while (HAL_UART_Receive(&huart2, &sym, sizeof(uint8_t), 500) == HAL_OK && ((sym != '\n') || (sym != '\0')))
+			{
+				if (itter < 20 && sym != '\0' && sym != '\r')
+					buff[itter++] = sym;
+			}
+			if (itter > 0)
+			{
+				queueItem_t qElem;
+
+				qElem.size = itter;
+				memset(qElem.str, '\0', 25);
+				memcpy(qElem.str, buff, itter);
+				if (xQueueSend(rxQueueHandler, &qElem, 20) == pdPASS)
+				{
+					char* str1 = "------------------\n\r";
+					HAL_UART_Transmit(&huart2, (uint8_t*)str1, strlen(str1), 20);
+				}
+				itter	= 0;
+				memset(buff, '\0', 25);
+			}
+			xSemaphoreGive(xMutex);
+		}
+		vTaskDelay(50);
+	}
+}
+
 /* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void const * argument)
-{
-  /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END 5 */
-}
-
-/* USER CODE BEGIN Header_parseTaskStart */
-/**
-* @brief Function implementing the parserTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_parseTaskStart */
-void parseTaskStart(void const * argument)
-{
-  /* USER CODE BEGIN parseTaskStart */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END parseTaskStart */
-}
 
 /**
   * @brief  This function is executed in case of error occurrence.

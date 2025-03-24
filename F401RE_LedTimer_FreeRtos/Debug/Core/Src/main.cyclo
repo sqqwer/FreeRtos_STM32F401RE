@@ -1,0 +1,8 @@
+main.c:112:5:main	1
+main.c:170:6:SystemClock_Config	3
+main.c:212:13:MX_USART2_UART_Init	2
+main.c:245:13:MX_GPIO_Init	1
+main.c:277:8:ledControlTask	4
+main.c:301:8:parseDataTask	9
+main.c:362:6:rxUartDataTask	10
+main.c:408:6:Error_Handler	1
